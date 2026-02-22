@@ -34,6 +34,45 @@ st.set_page_config(
 )
 
 # ==========================
+# FETCH EXPIRY LIST
+# ==========================
+
+EXPIRY_URL = "https://api.dhan.co/v2/optionchain/expirylist"
+
+def fetch_expiry_list():
+
+    payload = {
+        "UnderlyingScrip": NIFTY_SECURITY_ID,
+        "UnderlyingSeg": EXCHANGE_SEGMENT
+    }
+
+    try:
+        response = requests.post(
+            EXPIRY_URL,
+            headers=HEADERS,
+            json=payload,
+            timeout=10
+        )
+
+        if response.status_code != 200:
+            st.error(f"Expiry API error: {response.text}")
+            return []
+
+        data = response.json()
+
+        if data.get("status") == "failed":
+            st.error(f"Expiry fetch failed: {data}")
+            return []
+
+        # Dhan returns list inside "data"
+        expiry_list = data.get("data", [])
+
+        return expiry_list
+
+    except Exception as e:
+        st.error(f"Exception in expiry fetch: {e}")
+        return []
+# ==========================
 # OPTION CHAIN FETCH
 # ==========================
 
@@ -168,12 +207,22 @@ def create_heatmap(df):
 
 st.title("🚀 Institutional HFT NIFTY Reversal Engine")
 
-expiry = st.sidebar.text_input("Expiry (YYYY-MM-DD)", "2026-02-26")
+st.sidebar.header("📅 Expiry Selection")
+
+expiry_list = fetch_expiry_list()
+
+if not expiry_list:
+    st.stop()
+
+selected_expiry = st.sidebar.selectbox(
+    "Select Expiry",
+    expiry_list
+)
 
 if "history" not in st.session_state:
     st.session_state.history = []
 
-df, price = fetch_option_chain(expiry)
+df, price = fetch_option_chain(selected_expiry)
 
 if df is not None:
 
