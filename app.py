@@ -21,8 +21,8 @@ STRIKE_RANGE = 10
 REFRESH_INTERVAL = 30
 
 HEADERS = {
-    'client-id': CLIENT_ID,
-    'access-token': ACCESS_TOKEN,
+    'client-id': DHAN_CLIENT_ID,
+    'access-token': DHAN_ACCESS_TOKEN,
     'Content-Type': 'application/json'
 }
 
