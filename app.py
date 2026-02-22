@@ -84,7 +84,7 @@ def fetch_expiry_list():
 def fetch_option_chain(expiry):
 
     payload = {
-        "UnderlyingScrip": NIFTY_SECURITY_ID,   # MUST be int (13)
+        "UnderlyingScrip": NIFTY_SECURITY_ID,  # must be int
         "UnderlyingSeg": EXCHANGE_SEGMENT,
         "Expiry": expiry
     }
@@ -106,64 +106,65 @@ def fetch_option_chain(expiry):
             st.error(f"Dhan API failed: {data}")
             return None, None
 
-        data_block = data.get("data")
+        data_block = data.get("data", {})
 
-        # -------------------------
-        # STRUCTURE VALIDATION
-        # -------------------------
         if not isinstance(data_block, dict):
             st.error(f"Unexpected data format: {data_block}")
             return None, None
 
-        underlying_price = float(data_block.get("underlyingPrice", 0))
+        # ✅ Correct field name
+        underlying_price = float(data_block.get("last_price", 0))
 
-        option_list = data_block.get("oc", [])
+        oc_dict = data_block.get("oc", {})
 
-        if not isinstance(option_list, list):
+        if not isinstance(oc_dict, dict):
             st.error("Option chain structure invalid.")
             return None, None
 
-        # -------------------------
-        # PARSE STRIKES
-        # -------------------------
         records = []
 
-        for strike_data in option_list:
+        # -------------------------
+        # PARSE STRIKE DICT
+        # -------------------------
+        for strike_str, strike_data in oc_dict.items():
 
-            if not isinstance(strike_data, dict):
+            try:
+                strike = float(strike_str)
+            except:
                 continue
 
-            strike = strike_data.get("strikePrice")
+            ce = strike_data.get("ce", {}) or {}
+            pe = strike_data.get("pe", {}) or {}
 
-            ce = strike_data.get("CE", {}) or {}
-            pe = strike_data.get("PE", {}) or {}
+            ce_greeks = ce.get("greeks", {}) or {}
+            pe_greeks = pe.get("greeks", {}) or {}
 
             records.append({
                 "strike": strike,
 
-                "call_oi": ce.get("openInterest", 0),
-                "put_oi": pe.get("openInterest", 0),
+                "call_oi": ce.get("oi", 0),
+                "put_oi": pe.get("oi", 0),
 
-                "call_iv": ce.get("impliedVolatility", 0),
-                "put_iv": pe.get("impliedVolatility", 0),
+                "call_iv": ce_greeks.get("iv", 0),
+                "put_iv": pe_greeks.get("iv", 0),
 
-                "call_delta": ce.get("delta", 0),
-                "put_delta": pe.get("delta", 0),
+                "call_delta": ce_greeks.get("delta", 0),
+                "put_delta": pe_greeks.get("delta", 0),
 
-                "call_gamma": ce.get("gamma", 0),
-                "put_gamma": pe.get("gamma", 0),
+                "call_gamma": ce_greeks.get("gamma", 0),
+                "put_gamma": pe_greeks.get("gamma", 0),
 
-                "call_ltp": ce.get("lastPrice", 0),
-                "put_ltp": pe.get("lastPrice", 0),
+                "call_ltp": ce.get("ltp", 0),
+                "put_ltp": pe.get("ltp", 0),
             })
 
         df = pd.DataFrame(records)
 
         if df.empty:
-            st.warning("No option chain data returned.")
+            st.warning("No valid option chain data.")
             return None, None
 
-        df = df[df["strike"].notna()].sort_values("strike")
+        df = df.sort_values("strike")
 
         return df, underlying_price
 
