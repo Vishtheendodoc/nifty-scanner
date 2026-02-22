@@ -16,17 +16,11 @@ DHAN_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicG
 
 NIFTY_SECURITY_ID = 13
 EXCHANGE_SEGMENT = "IDX_I"
-OPTION_CHAIN_URL = "https://api.dhan.co/v2/optionchain"
 
 # ==========================
 # HEADERS (Correct for Dhan v2)
 # ==========================
 
-HEADERS = {
-    "Content-Type": "application/json",
-    "access-token": DHAN_ACCESS_TOKEN,
-    "Client-Id": DHAN_CLIENT_ID
-}
 
 st.set_page_config(
     page_title="Institutional HFT NIFTY Scanner",
@@ -34,15 +28,26 @@ st.set_page_config(
 )
 
 # ==========================
-# FETCH EXPIRY LIST
+# DHAN API CONFIG
 # ==========================
 
+OPTION_CHAIN_URL = "https://api.dhan.co/v2/optionchain"
 EXPIRY_URL = "https://api.dhan.co/v2/optionchain/expirylist"
+
+HEADERS = {
+    "Content-Type": "application/json",
+    "access-token": DHAN_ACCESS_TOKEN,
+    "Client-Id": DHAN_CLIENT_ID
+}
+
+# ==========================
+# FETCH EXPIRY LIST
+# ==========================
 
 def fetch_expiry_list():
 
     payload = {
-        "UnderlyingScrip": NIFTY_SECURITY_ID,
+        "UnderlyingScrip": NIFTY_SECURITY_ID,   # MUST be integer
         "UnderlyingSeg": EXCHANGE_SEGMENT
     }
 
@@ -54,32 +59,32 @@ def fetch_expiry_list():
             timeout=10
         )
 
-        if response.status_code != 200:
-            st.error(f"Expiry API error: {response.text}")
-            return []
-
         data = response.json()
 
-        if data.get("status") == "failed":
-            st.error(f"Expiry fetch failed: {data}")
+        if data.get("status") != "success":
+            st.error(f"Expiry API failed: {data}")
             return []
 
-        # Dhan returns list inside "data"
         expiry_list = data.get("data", [])
+
+        if not isinstance(expiry_list, list):
+            st.error("Invalid expiry structure received.")
+            return []
 
         return expiry_list
 
     except Exception as e:
         st.error(f"Exception in expiry fetch: {e}")
         return []
+
 # ==========================
-# OPTION CHAIN FETCH
+# FETCH OPTION CHAIN
 # ==========================
 
 def fetch_option_chain(expiry):
 
     payload = {
-        "UnderlyingScrip": NIFTY_SECURITY_ID,
+        "UnderlyingScrip": NIFTY_SECURITY_ID,   # MUST be int (13)
         "UnderlyingSeg": EXCHANGE_SEGMENT,
         "Expiry": expiry
     }
@@ -92,43 +97,70 @@ def fetch_option_chain(expiry):
             timeout=10
         )
 
-        if response.status_code != 200:
-            st.error(f"Dhan API error: {response.text}")
-            return None, None
-
         data = response.json()
 
-        if data.get("status") == "failed":
+        # -------------------------
+        # CHECK SUCCESS
+        # -------------------------
+        if data.get("status") != "success":
             st.error(f"Dhan API failed: {data}")
             return None, None
 
-        underlying_price = float(data.get("underlyingPrice", 0))
+        data_block = data.get("data")
 
+        # -------------------------
+        # STRUCTURE VALIDATION
+        # -------------------------
+        if not isinstance(data_block, dict):
+            st.error(f"Unexpected data format: {data_block}")
+            return None, None
+
+        underlying_price = float(data_block.get("underlyingPrice", 0))
+
+        option_list = data_block.get("oc", [])
+
+        if not isinstance(option_list, list):
+            st.error("Option chain structure invalid.")
+            return None, None
+
+        # -------------------------
+        # PARSE STRIKES
+        # -------------------------
         records = []
 
-        for strike_data in data.get("data", []):
+        for strike_data in option_list:
+
+            if not isinstance(strike_data, dict):
+                continue
 
             strike = strike_data.get("strikePrice")
-            ce = strike_data.get("CE", {})
-            pe = strike_data.get("PE", {})
+
+            ce = strike_data.get("CE", {}) or {}
+            pe = strike_data.get("PE", {}) or {}
 
             records.append({
                 "strike": strike,
+
                 "call_oi": ce.get("openInterest", 0),
                 "put_oi": pe.get("openInterest", 0),
+
                 "call_iv": ce.get("impliedVolatility", 0),
                 "put_iv": pe.get("impliedVolatility", 0),
+
                 "call_delta": ce.get("delta", 0),
                 "put_delta": pe.get("delta", 0),
+
                 "call_gamma": ce.get("gamma", 0),
                 "put_gamma": pe.get("gamma", 0),
+
                 "call_ltp": ce.get("lastPrice", 0),
-                "put_ltp": pe.get("lastPrice", 0)
+                "put_ltp": pe.get("lastPrice", 0),
             })
 
         df = pd.DataFrame(records)
 
         if df.empty:
+            st.warning("No option chain data returned.")
             return None, None
 
         df = df[df["strike"].notna()].sort_values("strike")
