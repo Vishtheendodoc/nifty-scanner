@@ -30,50 +30,60 @@ st.set_page_config(
 # ==========================
 
 def fetch_option_chain():
-    url = "https://api.dhan.co/optionchain"
+
+    url = "https://api.dhan.co/v2/optionchain"
+
     headers = {
         "Content-Type": "application/json",
-        "access-token": DHAN_ACCESS_TOKEN,
-        "client-id": DHAN_CLIENT_ID
+        "access-token": DHAN_ACCESS_TOKEN
     }
 
     payload = {
         "UnderlyingScrip": NIFTY_SECURITY_ID,
-        "UnderlyingSeg": EXCHANGE_SEGMENT
+        "UnderlyingSeg": EXCHANGE_SEGMENT,
+        "Expiry": "expiry"  # ⚠️ CHANGE to current weekly expiry
     }
 
-    response = requests.post(url, headers=headers, json=payload)
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
 
-    if response.status_code != 200:
-        st.error("Dhan API error")
+        if response.status_code != 200:
+            st.error(f"Dhan API error: {response.text}")
+            return None, None
+
+        data = response.json()
+
+        underlying_price = float(data["underlyingPrice"])
+
+        records = []
+
+        for strike_data in data["data"]:
+            strike = strike_data["strikePrice"]
+
+            ce = strike_data.get("CE", {})
+            pe = strike_data.get("PE", {})
+
+            records.append({
+                "strike": strike,
+                "call_oi": ce.get("openInterest", 0),
+                "put_oi": pe.get("openInterest", 0),
+                "call_iv": ce.get("impliedVolatility", 0),
+                "put_iv": pe.get("impliedVolatility", 0),
+                "call_delta": ce.get("delta", 0),
+                "put_delta": pe.get("delta", 0),
+                "call_gamma": ce.get("gamma", 0),
+                "put_gamma": pe.get("gamma", 0)
+            })
+
+        df = pd.DataFrame(records)
+
+        return df, underlying_price
+
+    except Exception as e:
+        st.error(f"Exception: {e}")
         return None, None
 
-    data = response.json()
-    underlying_price = float(data["underlyingPrice"])
-
-    records = []
-
-    for strike_data in data["data"]:
-        strike = strike_data["strikePrice"]
-
-        ce = strike_data.get("CE", {})
-        pe = strike_data.get("PE", {})
-
-        records.append({
-            "strike": strike,
-            "call_oi": ce.get("openInterest", 0),
-            "put_oi": pe.get("openInterest", 0),
-            "call_iv": ce.get("impliedVolatility", 0),
-            "put_iv": pe.get("impliedVolatility", 0),
-            "call_delta": ce.get("delta", 0),
-            "put_delta": pe.get("delta", 0),
-            "call_gamma": ce.get("gamma", 0),
-            "put_gamma": pe.get("gamma", 0)
-        })
-
-    df = pd.DataFrame(records)
-    return df, underlying_price
-
+expiry = st.sidebar.text_input("Expiry (YYYY-MM-DD)", "2026-02-26")
 
 # ==========================
 # CORE MODELS
