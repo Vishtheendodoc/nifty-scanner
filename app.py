@@ -39,12 +39,15 @@ def fetch_option_chain():
 
     url = "https://api.dhan.co/v2/optionchain"
 
-    headers = HEADERS
+    headers = {
+        "Content-Type": "application/json",
+        "access-token": DHAN_ACCESS_TOKEN
+    }
 
     payload = {
         "UnderlyingScrip": NIFTY_SECURITY_ID,
         "UnderlyingSeg": EXCHANGE_SEGMENT,
-        "Expiry": "expiry"  # ⚠️ CHANGE to current weekly expiry
+        "Expiry": EXPIRY_DATE   # make sure this variable exists in your file
     }
 
     try:
@@ -56,36 +59,48 @@ def fetch_option_chain():
 
         data = response.json()
 
-        underlying_price = float(data["underlyingPrice"])
+        # ✅ Correct underlying price extraction
+        underlying_price = float(data.get("underlyingPrice", 0))
 
         records = []
 
-        for strike_data in data["data"]:
-            strike = strike_data["strikePrice"]
+        # ✅ Correct structure parsing (THIS was wrong in your file)
+        for strike_data in data.get("data", []):
 
-            ce = strike_data.get("CE", {})
-            pe = strike_data.get("PE", {})
+            strike = strike_data.get("strikePrice")
+
+            ce_data = strike_data.get("CE", {})
+            pe_data = strike_data.get("PE", {})
 
             records.append({
                 "strike": strike,
-                "call_oi": ce.get("openInterest", 0),
-                "put_oi": pe.get("openInterest", 0),
-                "call_iv": ce.get("impliedVolatility", 0),
-                "put_iv": pe.get("impliedVolatility", 0),
-                "call_delta": ce.get("delta", 0),
-                "put_delta": pe.get("delta", 0),
-                "call_gamma": ce.get("gamma", 0),
-                "put_gamma": pe.get("gamma", 0)
+
+                "call_oi": ce_data.get("openInterest", 0),
+                "put_oi": pe_data.get("openInterest", 0),
+
+                "call_iv": ce_data.get("impliedVolatility", 0),
+                "put_iv": pe_data.get("impliedVolatility", 0),
+
+                "call_delta": ce_data.get("delta", 0),
+                "put_delta": pe_data.get("delta", 0),
+
+                "call_gamma": ce_data.get("gamma", 0),
+                "put_gamma": pe_data.get("gamma", 0),
+
+                "call_ltp": ce_data.get("lastPrice", 0),
+                "put_ltp": pe_data.get("lastPrice", 0)
             })
 
         df = pd.DataFrame(records)
 
+        # Remove empty rows
+        df = df[df["strike"].notna()]
+
         return df, underlying_price
 
     except Exception as e:
-        st.error(f"Exception: {e}")
+        st.error(f"Exception in option chain fetch: {e}")
         return None, None
-
 expiry = st.sidebar.text_input("Expiry (YYYY-MM-DD)", "2026-02-26")
 
 # ==========================
