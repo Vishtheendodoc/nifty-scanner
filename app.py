@@ -47,7 +47,7 @@ def fetch_option_chain():
     payload = {
         "UnderlyingScrip": NIFTY_SECURITY_ID,
         "UnderlyingSeg": EXCHANGE_SEGMENT,
-        "Expiry": EXPIRY_DATE   # make sure this variable exists in your file
+        "Expiry": expiry   # make sure this variable exists in your file
     }
 
     try:
