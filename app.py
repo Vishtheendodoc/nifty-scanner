@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 from sklearn.linear_model import LogisticRegression
 import os
+import time
 
 # ==========================
 # CONFIG
@@ -205,5 +206,23 @@ if df is not None:
     else:
         st.info("No extreme reversal")
 
-# Auto refresh
-st.rerun()
+
+st.sidebar.header("⚙️ Settings")
+
+refresh_interval = st.sidebar.slider(
+    "Auto Refresh Interval (seconds)",
+    min_value=5,
+    max_value=120,
+    value=30,
+    step=5
+)
+# ---------------------------
+# Safe Auto Refresh Logic
+# ---------------------------
+
+if "last_refresh" not in st.session_state:
+    st.session_state.last_refresh = time.time()
+
+if time.time() - st.session_state.last_refresh > refresh_interval:
+    st.session_state.last_refresh = time.time()
+    st.rerun()
