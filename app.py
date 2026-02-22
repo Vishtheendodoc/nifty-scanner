@@ -21,9 +21,9 @@ STRIKE_RANGE = 10
 REFRESH_INTERVAL = 30
 
 HEADERS = {
-    'client-id': DHAN_CLIENT_ID,
-    'access-token': DHAN_ACCESS_TOKEN,
-    'Content-Type': 'application/json'
+    "Content-Type": "application/json",
+    "access-token": ACCESS_TOKEN,
+    "Client-Id": CLIENT_ID
 }
 
 st.set_page_config(
@@ -35,30 +35,38 @@ st.set_page_config(
 # DHAN OPTION CHAIN FETCH
 # ==========================
 
-def fetch_option_chain():
-
-    url = "https://api.dhan.co/v2/optionchain"
-
-    headers = {
-        "Content-Type": "application/json",
-        "access-token": DHAN_ACCESS_TOKEN
-    }
+def fetch_option_chain(expiry):
 
     payload = {
-        "UnderlyingScrip": NIFTY_SECURITY_ID,
-        "UnderlyingSeg": EXCHANGE_SEGMENT,
-        "Expiry": expiry   # make sure this variable exists in your file
+        "UnderlyingScrip": NIFTY_SCRIP_ID,
+        "UnderlyingSeg": NIFTY_SEGMENT,
+        "Expiry": expiry
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        response = requests.post(
+            OPTION_CHAIN_URL,
+            headers=HEADERS,
+            json=payload,
+            timeout=10
+        )
 
         if response.status_code != 200:
             st.error(f"Dhan API error: {response.text}")
-            return None, None
+            return None
 
         data = response.json()
 
+        if data.get("status") == "failed":
+            st.error(f"Dhan API failed: {data}")
+            return None
+
+        return data
+
+    except Exception as e:
+        st.error(f"Exception: {e}")
+        return None
+       
         # ✅ Correct underlying price extraction
         underlying_price = float(data.get("underlyingPrice", 0))
 
