@@ -20,6 +20,12 @@ EXCHANGE_SEGMENT = "IDX_I"
 STRIKE_RANGE = 10
 REFRESH_INTERVAL = 30
 
+HEADERS = {
+    'client-id': CLIENT_ID,
+    'access-token': ACCESS_TOKEN,
+    'Content-Type': 'application/json'
+}
+
 st.set_page_config(
     page_title="Institutional HFT NIFTY Scanner",
     layout="wide"
@@ -33,10 +39,7 @@ def fetch_option_chain():
 
     url = "https://api.dhan.co/v2/optionchain"
 
-    headers = {
-        "Content-Type": "application/json",
-        "access-token": DHAN_ACCESS_TOKEN
-    }
+    headers = HEADERS
 
     payload = {
         "UnderlyingScrip": NIFTY_SECURITY_ID,
