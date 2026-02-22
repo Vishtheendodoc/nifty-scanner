@@ -206,4 +206,4 @@ if df is not None:
         st.info("No extreme reversal")
 
 # Auto refresh
-st.experimental_rerun()
+st.rerun()
