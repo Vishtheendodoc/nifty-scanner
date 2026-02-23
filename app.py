@@ -1,7 +1,8 @@
 """
-Institutional HFT NIFTY Reversal Engine — v2.3
-- Snapshots persist across refreshes and devices using st.cache_resource
-  (shared server-side memory — survives page reloads, works on all devices)
+Institutional HFT NIFTY Reversal Engine — v2.4
+- IV computed via Black-Scholes Newton-Raphson when API returns 0
+- Option chain table shows correct data
+- Persistent snapshots via st.cache_resource (shared across devices)
 - Light theme, pure JS auto-refresh, IST timestamps
 """
 
@@ -14,6 +15,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 from datetime import datetime, timezone, timedelta
+import math
 
 # ── IST ───────────────────────────────────────────────────────
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -25,31 +27,96 @@ def fmt_ist(dt):
     return dt.strftime("%d-%b-%Y  %I:%M:%S %p IST")
 
 # ==========================
+# BLACK-SCHOLES IV CALCULATOR
+# Used as fallback when API returns 0 for IV
+# ==========================
+
+def _bs_price(S, K, T, r, sigma, opt):
+    """Black-Scholes option price."""
+    if T <= 0 or sigma <= 0:
+        return max(0.0, (S - K) if opt == "C" else (K - S))
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    from scipy.special import ndtr
+    if opt == "C":
+        return S * ndtr(d1) - K * math.exp(-r * T) * ndtr(d2)
+    else:
+        return K * math.exp(-r * T) * ndtr(-d2) - S * ndtr(-d1)
+
+def _norm_cdf(x):
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2)))
+
+def _bs_price_fast(S, K, T, r, sigma, opt):
+    """BS price without scipy dependency."""
+    if T <= 0 or sigma <= 0:
+        return max(0.0, (S - K) if opt == "C" else (K - S))
+    d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    if opt == "C":
+        return S * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
+    else:
+        return K * math.exp(-r * T) * _norm_cdf(-d2) - S * _norm_cdf(-d1)
+
+def calc_iv(price, S, K, T_days, opt, r=0.065):
+    """
+    Newton-Raphson IV solver.
+    Returns IV in % (e.g. 15.5 means 15.5%), or 0.0 if unsolvable.
+    """
+    if price <= 0 or S <= 0 or K <= 0 or T_days <= 0:
+        return 0.0
+    T = T_days / 365.0
+    intrinsic = max(0.0, (S - K) if opt == "C" else (K - S))
+    if price < intrinsic * 0.99:
+        return 0.0
+
+    sigma = 0.3  # initial guess
+    for _ in range(100):
+        price_est = _bs_price_fast(S, K, T, r, sigma, opt)
+        # Vega
+        d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+        vega = S * _norm_cdf(d1) * math.sqrt(T)
+        if vega < 1e-10:
+            break
+        diff = price_est - price
+        sigma -= diff / vega
+        if sigma <= 0:
+            sigma = 1e-6
+        if abs(diff) < 1e-6:
+            break
+
+    if 0 < sigma < 5.0:
+        return round(sigma * 100, 2)
+    return 0.0
+
+def days_to_expiry(expiry_str):
+    """Days from now (IST) to expiry date string 'YYYY-MM-DD'."""
+    try:
+        exp_date = datetime.strptime(expiry_str, "%Y-%m-%d").replace(tzinfo=IST)
+        delta = (exp_date - now_ist()).total_seconds() / 86400
+        return max(0.0, delta)
+    except Exception:
+        return 30.0  # fallback
+
+
+# ==========================
 # PERSISTENT SHARED STORE
-# st.cache_resource creates a single object shared across ALL sessions,
-# browser tabs, and devices — it lives in the server process memory and
-# survives page reloads/refreshes until the server restarts.
 # ==========================
 @st.cache_resource
 def get_shared_store():
-    """Returns a dict that is shared across all users/sessions/refreshes."""
-    return {
-        "history": [],        # list of snapshot dicts
-        "max_history": 500,   # keep last 500 snapshots (~8hrs at 60s interval)
-    }
+    return {"history": [], "max_history": 500}
 
 store = get_shared_store()
 
-def append_snapshot(snap: dict):
-    """Thread-safe append with cap."""
+def append_snapshot(snap):
     store["history"].append(snap)
     if len(store["history"]) > store["max_history"]:
         store["history"] = store["history"][-store["max_history"]:]
 
-def get_history_df() -> pd.DataFrame:
+def get_history_df():
     if not store["history"]:
         return pd.DataFrame()
     return pd.DataFrame(store["history"])
+
 
 # ==========================
 # PAGE CONFIG
@@ -167,6 +234,18 @@ hr { border-color: #dde4f0 !important; margin: 18px 0 !important; }
     color: #2563eb;
     font-weight: 500;
     margin-right: 6px;
+    margin-bottom: 6px;
+}
+.iv-source-badge {
+    display: inline-block;
+    background: #fefce8;
+    border: 1px solid #fde68a;
+    border-radius: 6px;
+    padding: 3px 10px;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.65rem;
+    color: #92400e;
+    margin-left: 8px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -250,27 +329,26 @@ with st.sidebar:
 
     st.markdown("---")
     snap_count = len(store["history"])
-    st.markdown(
-        f'<span class="stat-pill">📦 {snap_count} snapshots</span>',
-        unsafe_allow_html=True,
-    )
+    st.markdown(f'<span class="stat-pill">📦 {snap_count} snapshots stored</span>', unsafe_allow_html=True)
     if st.button("Clear All Snapshots", use_container_width=True):
         store["history"].clear()
         st.success("History cleared for all devices.")
         st.rerun()
 
 # ==========================
-# AUTO-REFRESH via pure JS (no package needed)
-# window.parent.location.reload() reloads the Streamlit app page
+# AUTO-REFRESH via pure JS
 # ==========================
 if auto_refresh:
     components.html(
         f"""<script>
-        setTimeout(function() {{
-            window.parent.location.reload();
-        }}, {refresh_secs * 1000});
+        setTimeout(function() {{ window.parent.location.reload(); }}, {refresh_secs * 1000});
         </script>""",
         height=0, width=0,
+    )
+    st.sidebar.markdown(
+        f"<p style='font-family:DM Mono,monospace;font-size:0.7rem;color:#5a6a90'>"
+        f"🔄 Refreshing every {refresh_secs}s</p>",
+        unsafe_allow_html=True,
     )
 
 # ==========================
@@ -321,18 +399,22 @@ def fetch_option_chain(expiry):
         peg = pe.get("greeks") or {}
         rows.append({
             "strike":      strike,
-            "call_oi":     float(ce.get("oi")     or 0),
-            "put_oi":      float(pe.get("oi")      or 0),
-            "call_iv":     float(ceg.get("iv")     or 0),
-            "put_iv":      float(peg.get("iv")     or 0),
-            "call_delta":  float(ceg.get("delta")  or 0),
-            "put_delta":   float(peg.get("delta")  or 0),
-            "call_gamma":  float(ceg.get("gamma")  or 0),
-            "put_gamma":   float(peg.get("gamma")  or 0),
-            "call_ltp":    float(ce.get("ltp")     or 0),
-            "put_ltp":     float(pe.get("ltp")     or 0),
-            "call_volume": float(ce.get("volume")  or 0),
-            "put_volume":  float(pe.get("volume")  or 0),
+            "call_oi":     float(ce.get("oi")        or 0),
+            "put_oi":      float(pe.get("oi")         or 0),
+            "call_iv_api": float(ceg.get("iv")        or 0),
+            "put_iv_api":  float(peg.get("iv")        or 0),
+            "call_delta":  float(ceg.get("delta")     or 0),
+            "put_delta":   float(peg.get("delta")     or 0),
+            "call_gamma":  float(ceg.get("gamma")     or 0),
+            "put_gamma":   float(peg.get("gamma")     or 0),
+            "call_ltp":    float(ce.get("ltp")        or 0),
+            "put_ltp":     float(pe.get("ltp")        or 0),
+            "call_volume": float(ce.get("volume")     or 0),
+            "put_volume":  float(pe.get("volume")     or 0),
+            "call_bid":    float(ce.get("bid_price")  or 0),
+            "put_bid":     float(pe.get("bid_price")  or 0),
+            "call_ask":    float(ce.get("ask_price")  or 0),
+            "put_ask":     float(pe.get("ask_price")  or 0),
         })
 
     if not rows:
@@ -341,6 +423,45 @@ def fetch_option_chain(expiry):
 
     df = pd.DataFrame(rows).sort_values("strike").reset_index(drop=True)
     return df, underlying_price
+
+
+def enrich_with_bs_iv(df, spot, expiry_str):
+    """
+    If API IV is 0 for a strike, compute it from LTP using Black-Scholes.
+    Adds columns: call_iv, put_iv, iv_source ('api' or 'bs')
+    """
+    dte = days_to_expiry(expiry_str)
+
+    call_ivs, put_ivs, sources = [], [], []
+
+    for _, row in df.iterrows():
+        K = row["strike"]
+
+        # ── Call IV ──────────────────────────────────────
+        civ = row["call_iv_api"]
+        if civ < 0.5 and row["call_ltp"] > 0:
+            civ = calc_iv(row["call_ltp"], spot, K, dte, "C")
+            csrc = "bs"
+        else:
+            csrc = "api"
+
+        # ── Put IV ───────────────────────────────────────
+        piv = row["put_iv_api"]
+        if piv < 0.5 and row["put_ltp"] > 0:
+            piv = calc_iv(row["put_ltp"], spot, K, dte, "P")
+            psrc = "bs"
+        else:
+            psrc = "api"
+
+        call_ivs.append(civ)
+        put_ivs.append(piv)
+        sources.append("api" if csrc == "api" and psrc == "api" else "bs")
+
+    df = df.copy()
+    df["call_iv"] = call_ivs
+    df["put_iv"]  = put_ivs
+    df["iv_src"]  = sources
+    return df
 
 
 # ==========================
@@ -369,12 +490,15 @@ def compute_analytics(df, spot):
 
     atm_idx  = int((df["strike"] - spot).abs().idxmin())
     atm_band = df.iloc[max(0, atm_idx - 5): atm_idx + 6]
-    iv_skew  = float((atm_band["put_iv"] - atm_band["call_iv"]).mean()) if not atm_band.empty else 0.0
+
+    # IV skew uses enriched call_iv / put_iv
+    iv_skew = float((atm_band["put_iv"] - atm_band["call_iv"]).mean()) if not atm_band.empty else 0.0
+    atm_iv  = float((atm_band["call_iv"].mean() + atm_band["put_iv"].mean()) / 2)
 
     tvol = df["call_volume"].sum() + df["put_volume"].sum()
     vwiv = (
         ((df["call_iv"] * df["call_volume"]).sum() + (df["put_iv"] * df["put_volume"]).sum()) / tvol
-        if tvol > 0 else (df["call_iv"].mean() + df["put_iv"].mean()) / 2
+        if tvol > 0 else atm_iv
     )
 
     df["pressure"] = df["put_delta"].abs() * df["put_oi"] - df["call_delta"] * df["call_oi"]
@@ -398,7 +522,7 @@ def compute_analytics(df, spot):
         df=df, pcr=pcr, max_pain=max_pain,
         net_gamma=net_gamma,
         gamma_regime="LONG GAMMA" if net_gamma >= 0 else "SHORT GAMMA",
-        net_flow=net_flow, iv_skew=iv_skew, vwiv=vwiv,
+        net_flow=net_flow, iv_skew=iv_skew, atm_iv=atm_iv, vwiv=vwiv,
         top_call=top_call, top_put=top_put, score=score,
         total_coi=total_coi, total_poi=total_poi,
     )
@@ -443,20 +567,34 @@ def chart_gex(df, spot):
     return fig
 
 
-def chart_iv_skew(df, spot):
+def chart_iv_skew(df, spot, iv_source):
     atm_idx = int((df["strike"] - spot).abs().idxmin())
-    band = df.iloc[max(0, atm_idx - 15): atm_idx + 16]
+    band = df.iloc[max(0, atm_idx - 15): atm_idx + 16].copy()
+
+    # Filter out zero-IV rows for cleaner chart
+    band_valid = band[(band["call_iv"] > 0) | (band["put_iv"] > 0)]
+
     fig = go.Figure()
-    fig.add_scatter(x=band["strike"], y=band["call_iv"], name="Call IV",
-                    line=dict(color=CALL_CLR, width=2.5),
-                    mode="lines+markers", marker=dict(size=5))
-    fig.add_scatter(x=band["strike"], y=band["put_iv"],  name="Put IV",
-                    line=dict(color=PUT_CLR,  width=2.5),
-                    mode="lines+markers", marker=dict(size=5))
+
+    call_valid = band_valid[band_valid["call_iv"] > 0]
+    put_valid  = band_valid[band_valid["put_iv"]  > 0]
+
+    if not call_valid.empty:
+        fig.add_scatter(x=call_valid["strike"], y=call_valid["call_iv"], name="Call IV",
+                        line=dict(color=CALL_CLR, width=2.5),
+                        mode="lines+markers", marker=dict(size=5))
+    if not put_valid.empty:
+        fig.add_scatter(x=put_valid["strike"], y=put_valid["put_iv"], name="Put IV",
+                        line=dict(color=PUT_CLR, width=2.5),
+                        mode="lines+markers", marker=dict(size=5))
+
     fig.add_vline(x=spot, line_dash="dash", line_color=SPOT_CLR, line_width=2,
                   annotation_text="ATM", annotation_font_color=SPOT_CLR)
-    fig.update_layout(**_layout(title="IV Skew -- ATM +/-15 Strikes", height=300,
-                                legend=dict(orientation="h", y=1.1)))
+
+    title = f"IV Skew -- ATM +/-15 Strikes  [{iv_source}]"
+    fig.update_layout(**_layout(title=title, height=320,
+                                legend=dict(orientation="h", y=1.1),
+                                yaxis=dict(title="IV (%)", gridcolor="#e5eaf2")))
     return fig
 
 
@@ -471,7 +609,7 @@ def chart_pressure(df):
     return fig
 
 
-def chart_history(hist: pd.DataFrame):
+def chart_history(hist):
     if len(hist) < 2:
         return None
     fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -484,9 +622,9 @@ def chart_history(hist: pd.DataFrame):
         go.Scatter(x=hist["time"], y=hist["score"], name="Reversal Score",
                    line=dict(color=ATM_CLR, width=2, dash="dot")),
         secondary_y=True)
-    fig.update_yaxes(title_text="NIFTY Price (IST)", secondary_y=False,
+    fig.update_yaxes(title_text="NIFTY Price", secondary_y=False,
                      gridcolor="#e5eaf2", color=CALL_CLR)
-    fig.update_yaxes(title_text="Reversal Score",    secondary_y=True,
+    fig.update_yaxes(title_text="Reversal Score", secondary_y=True,
                      range=[0, 100], gridcolor="#e5eaf2", color=ATM_CLR)
     fig.add_hline(y=75, secondary_y=True, line_dash="dash",
                   line_color="rgba(232,41,74,0.4)",
@@ -494,7 +632,7 @@ def chart_history(hist: pd.DataFrame):
     fig.add_hline(y=25, secondary_y=True, line_dash="dash",
                   line_color="rgba(37,99,235,0.4)")
     fig.update_layout(**_layout(title="Intraday Price vs Reversal Score (IST)",
-                                height=420, legend=dict(orientation="h", y=1.1)))
+                                height=380, legend=dict(orientation="h", y=1.1)))
     return fig
 
 
@@ -522,7 +660,7 @@ with col_time:
 st.markdown("---")
 
 # ==========================
-# FETCH DATA
+# FETCH & ENRICH DATA
 # ==========================
 with st.spinner("Fetching live option chain..."):
     df_raw, spot_price = fetch_option_chain(selected_expiry)
@@ -531,31 +669,40 @@ if df_raw is None:
     st.error("Failed to load data. Check your API token and network connection.")
     st.stop()
 
+# Enrich with Black-Scholes IV where API returns 0
+with st.spinner("Computing IV..."):
+    df_raw = enrich_with_bs_iv(df_raw, spot_price, selected_expiry)
+
+# Determine IV source for display
+bs_count  = (df_raw["iv_src"] == "bs").sum()
+api_count = (df_raw["iv_src"] == "api").sum()
+iv_source_label = (
+    "IV: API" if bs_count == 0
+    else f"IV: Black-Scholes ({bs_count} strikes computed)"
+)
+
 a  = compute_analytics(df_raw, spot_price)
 df = a["df"]
 
-# ── Append snapshot to shared persistent store ───────────────
-# Deduplicate: skip if last snapshot was taken within 5 seconds
-# (prevents double-writes when multiple tabs refresh simultaneously)
+# ── Append snapshot (deduplicated) ───────────────────────────
 hist_list = store["history"]
-now = now_ist()
+now       = now_ist()
 should_append = True
 if hist_list:
     last_time = hist_list[-1]["time"]
-    if isinstance(last_time, datetime):
-        delta_secs = abs((now - last_time).total_seconds())
-        if delta_secs < 5:
-            should_append = False
+    if isinstance(last_time, datetime) and abs((now - last_time).total_seconds()) < 5:
+        should_append = False
 
 if should_append:
     append_snapshot({
-        "time":    now,
-        "price":   spot_price,
-        "score":   a["score"],
-        "pcr":     a["pcr"],
+        "time":      now,
+        "price":     spot_price,
+        "score":     a["score"],
+        "pcr":       a["pcr"],
         "net_gamma": a["net_gamma"],
-        "iv_skew": a["iv_skew"],
-        "expiry":  selected_expiry,
+        "iv_skew":   a["iv_skew"],
+        "atm_iv":    a["atm_iv"],
+        "expiry":    selected_expiry,
     })
 
 # ==========================
@@ -586,6 +733,15 @@ else:
         f'NO EXTREME SIGNAL &nbsp;|&nbsp; Score: {s:.0f}/100 &nbsp;|&nbsp; Market in equilibrium</div>',
         unsafe_allow_html=True)
 
+# IV source notice
+if bs_count > 0:
+    st.markdown(
+        f'<span class="iv-source-badge">⚡ {iv_source_label} — API greeks unavailable, '
+        f'IV computed via Black-Scholes Newton-Raphson</span>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("<br>", unsafe_allow_html=True)
+
 # ==========================
 # METRICS ROW 1
 # ==========================
@@ -595,14 +751,14 @@ m2.metric("PCR",            f"{a['pcr']:.3f}",
           delta="Bullish" if a["pcr"] > pcr_bull else ("Bearish" if a["pcr"] < pcr_bear else "Neutral"))
 m3.metric("Max Pain",       f"Rs {a['max_pain']:,.0f}")
 m4.metric("Gamma Regime",   a["gamma_regime"])
-m5.metric("IV Skew (ATM)",  f"{a['iv_skew']:.2f}%")
+m5.metric("ATM IV",         f"{a['atm_iv']:.1f}%")
 m6.metric("Reversal Score", f"{s:.1f}/100")
 
 m7, m8, m9, m10 = st.columns(4)
 m7.metric("Total Call OI",     f"{a['total_coi']/1e5:.2f}L")
 m8.metric("Total Put OI",      f"{a['total_poi']/1e5:.2f}L")
 m9.metric("Net Delta Flow",    f"{a['net_flow']:,.0f}")
-m10.metric("Resistance Level", f"Rs {a['top_call']:,.0f}")
+m10.metric("IV Skew (ATM)",    f"{a['iv_skew']:.2f}%")
 
 st.markdown("---")
 
@@ -618,26 +774,25 @@ with tab1:
 with tab2:
     st.plotly_chart(chart_gex(df, spot_price), use_container_width=True)
 with tab3:
-    st.plotly_chart(chart_iv_skew(df, spot_price), use_container_width=True)
+    st.plotly_chart(chart_iv_skew(df, spot_price, iv_source_label), use_container_width=True)
 with tab4:
     st.plotly_chart(chart_pressure(df), use_container_width=True)
 
 # ==========================
-# HISTORY CHART
+# HISTORY CHARTS
 # ==========================
 st.markdown("---")
 hist_df = get_history_df()
 
 if not hist_df.empty and len(hist_df) >= 2:
-    # Show stats bar
-    first_t = fmt_ist(hist_df["time"].iloc[0])
-    last_t  = fmt_ist(hist_df["time"].iloc[-1])
-    price_range = f"Rs {hist_df['price'].min():,.0f} – Rs {hist_df['price'].max():,.0f}"
+    first_t     = fmt_ist(hist_df["time"].iloc[0])
+    last_t      = fmt_ist(hist_df["time"].iloc[-1])
+    price_range = f"Rs {hist_df['price'].min():,.0f} - Rs {hist_df['price'].max():,.0f}"
     st.markdown(
         f'<span class="stat-pill">📦 {len(hist_df)} snapshots</span>'
-        f'<span class="stat-pill">🕐 From: {first_t}</span>'
-        f'<span class="stat-pill">🕐 To: {last_t}</span>'
-        f'<span class="stat-pill">📈 Range: {price_range}</span>',
+        f'<span class="stat-pill">From: {first_t}</span>'
+        f'<span class="stat-pill">To: {last_t}</span>'
+        f'<span class="stat-pill">Range: {price_range}</span>',
         unsafe_allow_html=True,
     )
     st.markdown("<br>", unsafe_allow_html=True)
@@ -646,46 +801,72 @@ if not hist_df.empty and len(hist_df) >= 2:
     if fig_hist:
         st.plotly_chart(fig_hist, use_container_width=True)
 
-    # PCR history sub-chart
-    fig_pcr = go.Figure()
-    fig_pcr.add_scatter(x=hist_df["time"], y=hist_df["pcr"], name="PCR",
-                        line=dict(color="#7c3aed", width=2),
-                        fill="tozeroy", fillcolor="rgba(124,58,237,0.07)")
-    fig_pcr.add_hline(y=pcr_bull, line_dash="dash", line_color="rgba(37,99,235,0.5)",
-                      annotation_text="Bullish", annotation_font_color=CALL_CLR)
-    fig_pcr.add_hline(y=pcr_bear, line_dash="dash", line_color="rgba(232,41,74,0.5)",
-                      annotation_text="Bearish", annotation_font_color=PUT_CLR)
-    fig_pcr.update_layout(**_layout(title="PCR History (IST)", height=220))
-    st.plotly_chart(fig_pcr, use_container_width=True)
-
+    # PCR + ATM IV history
+    fig2 = make_subplots(specs=[[{"secondary_y": True}]])
+    fig2.add_trace(
+        go.Scatter(x=hist_df["time"], y=hist_df["pcr"], name="PCR",
+                   line=dict(color="#7c3aed", width=2),
+                   fill="tozeroy", fillcolor="rgba(124,58,237,0.07)"),
+        secondary_y=False)
+    if "atm_iv" in hist_df.columns:
+        fig2.add_trace(
+            go.Scatter(x=hist_df["time"], y=hist_df["atm_iv"], name="ATM IV %",
+                       line=dict(color=ATM_CLR, width=2, dash="dot")),
+            secondary_y=True)
+    fig2.add_hline(y=pcr_bull, secondary_y=False, line_dash="dash",
+                   line_color="rgba(37,99,235,0.5)", annotation_text="PCR Bullish",
+                   annotation_font_color=CALL_CLR)
+    fig2.add_hline(y=pcr_bear, secondary_y=False, line_dash="dash",
+                   line_color="rgba(232,41,74,0.5)", annotation_text="PCR Bearish",
+                   annotation_font_color=PUT_CLR)
+    fig2.update_yaxes(title_text="PCR",    secondary_y=False, gridcolor="#e5eaf2", color="#7c3aed")
+    fig2.update_yaxes(title_text="ATM IV %", secondary_y=True, gridcolor="#e5eaf2", color=ATM_CLR)
+    fig2.update_layout(**_layout(title="PCR + ATM IV History (IST)", height=260,
+                                 legend=dict(orientation="h", y=1.1)))
+    st.plotly_chart(fig2, use_container_width=True)
 else:
-    st.info("📈 History charts will appear after 2+ snapshots are collected. Snapshots persist across all devices and page refreshes.")
+    st.info("📈 History charts will appear after 2+ snapshots. Data is shared across all devices and persists across page refreshes.")
 
 # ==========================
-# OPTION CHAIN TABLE (toggle)
+# OPTION CHAIN TABLE
 # ==========================
 if show_table:
     st.markdown("---")
     st.markdown("### Option Chain Data")
+
     atm_i = int((df["strike"] - spot_price).abs().idxmin())
     lo = max(0, atm_i - num_strikes)
     hi = min(len(df), atm_i + num_strikes + 1)
     disp = df.iloc[lo:hi].copy()
-    for c in ["call_oi", "put_oi"]:
-        disp[c] = (disp[c] / 1e3).round(1).astype(str) + "K"
-    for c in ["call_iv", "put_iv"]:
-        disp[c] = disp[c].round(2).astype(str) + "%"
-    for c in ["call_delta", "put_delta"]:
-        disp[c] = disp[c].round(4)
+
+    # Build clean display df with proper formatting
+    tbl = pd.DataFrame()
+    tbl["Strike"]  = disp["strike"].astype(int)
+    tbl["C OI"]    = (disp["call_oi"] / 1e3).round(1).astype(str) + "K"
+    tbl["C IV %"]  = disp["call_iv"].round(2)
+    tbl["C Delta"] = disp["call_delta"].round(4)
+    tbl["C LTP"]   = disp["call_ltp"].round(2)
+    tbl["P LTP"]   = disp["put_ltp"].round(2)
+    tbl["P Delta"] = disp["put_delta"].round(4)
+    tbl["P IV %"]  = disp["put_iv"].round(2)
+    tbl["P OI"]    = (disp["put_oi"] / 1e3).round(1).astype(str) + "K"
+    tbl["IV Src"]  = disp["iv_src"]
+
+    # Highlight ATM row
+    def highlight_atm(row):
+        strike_val = row["Strike"]
+        atm_strike = int(df.loc[atm_i, "strike"])
+        if strike_val == atm_strike:
+            return ["background-color: #fffbeb; font-weight: bold"] * len(row)
+        return [""] * len(row)
+
     st.dataframe(
-        disp[["strike","call_oi","call_iv","call_delta","call_ltp",
-              "put_ltp","put_delta","put_iv","put_oi"]].rename(columns={
-            "strike":"Strike","call_oi":"C OI","call_iv":"C IV",
-            "call_delta":"C Delta","call_ltp":"C LTP",
-            "put_ltp":"P LTP","put_delta":"P Delta","put_iv":"P IV","put_oi":"P OI",
-        }),
-        use_container_width=True, height=420,
+        tbl.style.apply(highlight_atm, axis=1),
+        use_container_width=True,
+        height=min(420, (hi - lo + 1) * 35 + 40),
     )
+    if bs_count > 0:
+        st.caption(f"IV Src: 'api' = from Dhan API greeks, 'bs' = computed via Black-Scholes from LTP")
 
 # ==========================
 # FOOTER
@@ -697,6 +878,6 @@ st.markdown(
     f"LAST UPDATE: {fmt_ist(now_ist())} &nbsp;|&nbsp; "
     f"EXPIRY: {selected_expiry} &nbsp;|&nbsp; "
     f"SNAPSHOTS: {len(store['history'])}/500 &nbsp;|&nbsp; "
-    f"DATA SHARED ACROSS ALL DEVICES</p>",
+    f"SHARED ACROSS ALL DEVICES</p>",
     unsafe_allow_html=True,
 )
