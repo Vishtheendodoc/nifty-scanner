@@ -1,9 +1,12 @@
 """
-Institutional HFT NIFTY Reversal Engine — v2.1
-Light theme + working auto-refresh via st_autorefresh + IST timestamps.
+Institutional HFT NIFTY Reversal Engine — v2.2
+- Light theme
+- Auto-refresh via pure JS (no external package needed)
+- All times in IST
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import requests
@@ -12,7 +15,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 from datetime import datetime, timezone, timedelta
 
-# ── IST timezone ──────────────────────────────────────────────
+# ── IST ───────────────────────────────────────────────────────
 IST = timezone(timedelta(hours=5, minutes=30))
 
 def now_ist():
@@ -20,17 +23,6 @@ def now_ist():
 
 def fmt_ist(dt):
     return dt.strftime("%d-%b-%Y  %I:%M:%S %p IST")
-
-# ── Auto-refresh ───────────────────────────────────────────────
-try:
-    from streamlit_autorefresh import st_autorefresh
-except ImportError:
-    import subprocess, sys
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "streamlit-autorefresh", "--quiet"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    from streamlit_autorefresh import st_autorefresh
 
 # ==========================
 # PAGE CONFIG
@@ -47,7 +39,7 @@ st.set_page_config(
 # ==========================
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 
 html, body, [class*="css"] {
     font-family: 'Plus Jakarta Sans', sans-serif;
@@ -75,11 +67,11 @@ h2, h3 {
     padding-bottom: 4px;
 }
 [data-testid="metric-container"] {
-    background: #ffffff;
-    border: 1px solid #dde4f0;
-    border-radius: 12px;
+    background: #ffffff !important;
+    border: 1px solid #dde4f0 !important;
+    border-radius: 12px !important;
     padding: 14px 18px !important;
-    box-shadow: 0 2px 8px rgba(15,30,80,0.06);
+    box-shadow: 0 2px 8px rgba(15,30,80,0.06) !important;
     position: relative;
     overflow: hidden;
 }
@@ -93,17 +85,19 @@ h2, h3 {
 }
 [data-testid="stMetricValue"] {
     font-family: 'DM Mono', monospace !important;
-    font-size: 1.4rem !important;
+    font-size: 1.35rem !important;
     font-weight: 500 !important;
     color: #0f1e3d !important;
 }
 [data-testid="stMetricLabel"] {
-    font-size: 0.62rem !important;
+    font-size: 0.60rem !important;
     letter-spacing: 0.1em !important;
     color: #7b8db0 !important;
     text-transform: uppercase !important;
     font-weight: 600 !important;
 }
+[data-testid="stMetricDelta"] { font-size: 0.75rem !important; }
+
 .signal-box {
     border-radius: 10px;
     padding: 14px 20px;
@@ -116,6 +110,7 @@ h2, h3 {
 .signal-top     { background:#fff0f2; border-left-color:#e8294a; color:#c01535; }
 .signal-bottom  { background:#f0fdf5; border-left-color:#16a34a; color:#15803d; }
 .signal-neutral { background:#f0f5ff; border-left-color:#3b82f6; color:#1d4ed8; }
+
 section[data-testid="stSidebar"] {
     background: #ffffff !important;
     border-right: 1px solid #dde4f0 !important;
@@ -133,12 +128,6 @@ hr { border-color: #dde4f0 !important; margin: 18px 0 !important; }
     background: #f0f5ff; border: 1px solid #c7d4f0;
     color: #1d4ed8; border-radius: 8px;
     font-size: 0.75rem; font-weight: 600;
-}
-.refresh-badge {
-    display: inline-block; background: #eff6ff;
-    border: 1px solid #bfdbfe; color: #1d4ed8;
-    border-radius: 6px; padding: 3px 10px;
-    font-family: 'DM Mono', monospace; font-size: 0.7rem;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -169,7 +158,6 @@ CHART_BASE = dict(
     xaxis=dict(gridcolor="#e5eaf2", zerolinecolor="#e5eaf2", linecolor="#cbd5e1"),
     yaxis=dict(gridcolor="#e5eaf2", zerolinecolor="#e5eaf2", linecolor="#cbd5e1"),
 )
-
 CALL_CLR = "#2563eb"
 PUT_CLR  = "#e8294a"
 SPOT_CLR = "#059669"
@@ -185,7 +173,7 @@ if "history" not in st.session_state:
 # SIDEBAR
 # ==========================
 with st.sidebar:
-    st.markdown("### ⚙ Configuration")
+    st.markdown("### Configuration")
     st.markdown("---")
 
     @st.cache_data(ttl=120)
@@ -213,38 +201,46 @@ with st.sidebar:
     selected_expiry = st.selectbox("Expiry Date", expiry_list, index=0)
 
     st.markdown("---")
-    st.markdown("### 🔄 Auto Refresh")
-    auto_refresh = st.toggle("Enable", value=True)
-    refresh_secs = st.slider("Interval (s)", 10, 300, 30, 5, disabled=not auto_refresh)
+    st.markdown("### Auto Refresh")
+    auto_refresh = st.toggle("Enable Auto Refresh", value=True)
+    refresh_secs = st.slider("Interval (seconds)", 10, 300, 30, 5, disabled=not auto_refresh)
 
     st.markdown("---")
-    st.markdown("### 🎯 Signal Thresholds")
+    st.markdown("### Signal Thresholds")
     reversal_threshold = st.slider("Reversal Score Trigger", 60, 95, 75)
     pcr_bull = st.slider("PCR Bullish Level", 1.0, 2.5, 1.5, 0.1)
     pcr_bear = st.slider("PCR Bearish Level", 0.3, 1.0, 0.7, 0.1)
 
     st.markdown("---")
-    st.markdown("### 📋 Display")
+    st.markdown("### Display")
     show_table  = st.toggle("Show Option Chain Table", value=False)
     num_strikes = st.slider("Strikes +/-ATM", 5, 30, 15)
 
-    if st.button("🗑 Clear History", use_container_width=True):
+    if st.button("Clear History", use_container_width=True):
         st.session_state.history.clear()
         st.success("History cleared.")
 
 # ==========================
-# AUTO-REFRESH via st_autorefresh
-# This is the ONLY correct approach — injects a JS timer that reloads
-# the Streamlit app every N milliseconds. No time.time() hacks needed.
+# AUTO-REFRESH via pure JavaScript
+# Uses window.setTimeout to trigger a Streamlit rerun after N seconds.
+# No external packages — works on Streamlit Cloud, local, anywhere.
 # ==========================
 if auto_refresh:
-    refresh_count = st_autorefresh(
-        interval=refresh_secs * 1000,
-        limit=None,
-        key="hft_autorefresh",
+    components.html(
+        f"""
+        <script>
+            // Wait N ms then reload the parent Streamlit page
+            setTimeout(function() {{
+                window.parent.location.reload();
+            }}, {refresh_secs * 1000});
+        </script>
+        """,
+        height=0,
+        width=0,
     )
     st.sidebar.markdown(
-        f'<span class="refresh-badge">🔄 Refresh #{refresh_count} · every {refresh_secs}s</span>',
+        f"<p style='font-family:DM Mono,monospace;font-size:0.7rem;"
+        f"color:#5a6a90;margin-top:4px'>🔄 Refreshing every {refresh_secs}s</p>",
         unsafe_allow_html=True,
     )
 
@@ -255,7 +251,9 @@ def fetch_option_chain(expiry):
     try:
         r = requests.post(
             OPTION_CHAIN_URL, headers=HEADERS,
-            json={"UnderlyingScrip": NIFTY_SECURITY_ID, "UnderlyingSeg": EXCHANGE_SEGMENT, "Expiry": expiry},
+            json={"UnderlyingScrip": NIFTY_SECURITY_ID,
+                  "UnderlyingSeg":   EXCHANGE_SEGMENT,
+                  "Expiry":          expiry},
             timeout=10,
         )
         r.raise_for_status()
@@ -351,7 +349,6 @@ def compute_analytics(df, spot):
     )
 
     df["pressure"] = df["put_delta"].abs() * df["put_oi"] - df["call_delta"] * df["call_oi"]
-
     top_call = float(df.loc[df["call_oi"].idxmax(), "strike"])
     top_put  = float(df.loc[df["put_oi"].idxmax(),  "strike"])
 
@@ -371,7 +368,7 @@ def compute_analytics(df, spot):
     return dict(
         df=df, pcr=pcr, max_pain=max_pain,
         net_gamma=net_gamma,
-        gamma_regime="LONG GAMMA UP" if net_gamma >= 0 else "SHORT GAMMA DN",
+        gamma_regime="LONG GAMMA" if net_gamma >= 0 else "SHORT GAMMA",
         net_flow=net_flow, iv_skew=iv_skew, vwiv=vwiv,
         top_call=top_call, top_put=top_put, score=score,
         total_coi=total_coi, total_poi=total_poi,
@@ -401,16 +398,13 @@ def chart_oi_profile(df, spot, top_call, top_put):
     fig.add_vline(x=top_put,  line_dash="dot",  line_color=PUT_CLR,  line_width=1.5,
                   annotation_text="Support", annotation_font_color=PUT_CLR,
                   annotation_position="bottom right")
-    fig.update_layout(**_layout(title="Open Interest Profile", height=340, barmode="overlay",
-                                legend=dict(orientation="h", y=1.1)))
+    fig.update_layout(**_layout(title="Open Interest Profile", height=340,
+                                barmode="overlay", legend=dict(orientation="h", y=1.1)))
     return fig
 
 
 def chart_gex(df, spot):
-    colors = [
-        "rgba(37,99,235,0.75)" if v >= 0 else "rgba(232,41,74,0.75)"
-        for v in df["gex"]
-    ]
+    colors = ["rgba(37,99,235,0.75)" if v >= 0 else "rgba(232,41,74,0.75)" for v in df["gex"]]
     fig = go.Figure(go.Bar(x=df["strike"], y=df["gex"],
                            marker_color=colors, marker_line_width=0))
     fig.add_vline(x=spot, line_dash="dash", line_color=SPOT_CLR, line_width=2,
@@ -427,8 +421,8 @@ def chart_iv_skew(df, spot):
     fig.add_scatter(x=band["strike"], y=band["call_iv"], name="Call IV",
                     line=dict(color=CALL_CLR, width=2.5),
                     mode="lines+markers", marker=dict(size=5))
-    fig.add_scatter(x=band["strike"], y=band["put_iv"], name="Put IV",
-                    line=dict(color=PUT_CLR, width=2.5),
+    fig.add_scatter(x=band["strike"], y=band["put_iv"],  name="Put IV",
+                    line=dict(color=PUT_CLR,  width=2.5),
                     mode="lines+markers", marker=dict(size=5))
     fig.add_vline(x=spot, line_dash="dash", line_color=SPOT_CLR, line_width=2,
                   annotation_text="ATM", annotation_font_color=SPOT_CLR)
@@ -463,14 +457,14 @@ def chart_history(hist):
         secondary_y=True)
     fig.update_yaxes(title_text="NIFTY Price (IST)", secondary_y=False,
                      gridcolor="#e5eaf2", color=CALL_CLR)
-    fig.update_yaxes(title_text="Reversal Score", secondary_y=True,
+    fig.update_yaxes(title_text="Reversal Score",    secondary_y=True,
                      range=[0, 100], gridcolor="#e5eaf2", color=ATM_CLR)
     fig.add_hline(y=75, secondary_y=True, line_dash="dash",
                   line_color="rgba(232,41,74,0.4)",
                   annotation_text="Reversal zone", annotation_font_color="#e8294a")
     fig.add_hline(y=25, secondary_y=True, line_dash="dash",
                   line_color="rgba(37,99,235,0.4)")
-    fig.update_layout(**_layout(title="Intraday Price vs Reversal Score",
+    fig.update_layout(**_layout(title="Intraday Price vs Reversal Score (IST)",
                                 height=380, legend=dict(orientation="h", y=1.1)))
     return fig
 
@@ -484,7 +478,7 @@ with col_title:
         "<h1>📡 Institutional HFT NIFTY Reversal Engine</h1>"
         "<p style='color:#7b8db0;font-size:0.7rem;letter-spacing:0.08em;"
         "margin-top:-4px;font-weight:600'>"
-        "REAL-TIME OPTION FLOW · GAMMA EXPOSURE · REVERSAL PROBABILITY</p>",
+        "REAL-TIME OPTION FLOW  ·  GAMMA EXPOSURE  ·  REVERSAL PROBABILITY</p>",
         unsafe_allow_html=True,
     )
 with col_time:
@@ -529,24 +523,24 @@ if s >= reversal_threshold:
     if a["net_flow"] < 0:
         st.markdown(
             f'<div class="signal-box signal-top">'
-            f'WARNING: HIGH TOP REVERSAL PROBABILITY | Score: {s:.0f}/100 | '
-            f'PCR: {a["pcr"]:.2f} | Resistance: Rs {a["top_call"]:,.0f}</div>',
+            f'WARNING: HIGH TOP REVERSAL PROBABILITY &nbsp;|&nbsp; Score: {s:.0f}/100 &nbsp;|&nbsp;'
+            f' PCR: {a["pcr"]:.2f} &nbsp;|&nbsp; Resistance: Rs {a["top_call"]:,.0f}</div>',
             unsafe_allow_html=True)
     else:
         st.markdown(
             f'<div class="signal-box signal-bottom">'
-            f'HIGH BOTTOM REVERSAL PROBABILITY | Score: {s:.0f}/100 | '
-            f'PCR: {a["pcr"]:.2f} | Support: Rs {a["top_put"]:,.0f}</div>',
+            f'HIGH BOTTOM REVERSAL PROBABILITY &nbsp;|&nbsp; Score: {s:.0f}/100 &nbsp;|&nbsp;'
+            f' PCR: {a["pcr"]:.2f} &nbsp;|&nbsp; Support: Rs {a["top_put"]:,.0f}</div>',
             unsafe_allow_html=True)
 elif s <= (100 - reversal_threshold):
     st.markdown(
         f'<div class="signal-box signal-top">'
-        f'BEARISH MOMENTUM SIGNAL | Score: {s:.0f}/100</div>',
+        f'BEARISH MOMENTUM SIGNAL &nbsp;|&nbsp; Score: {s:.0f}/100</div>',
         unsafe_allow_html=True)
 else:
     st.markdown(
         f'<div class="signal-box signal-neutral">'
-        f'NO EXTREME SIGNAL | Score: {s:.0f}/100 | Market in equilibrium</div>',
+        f'NO EXTREME SIGNAL &nbsp;|&nbsp; Score: {s:.0f}/100 &nbsp;|&nbsp; Market in equilibrium</div>',
         unsafe_allow_html=True)
 
 # ==========================
@@ -561,7 +555,6 @@ m4.metric("Gamma Regime",   a["gamma_regime"])
 m5.metric("IV Skew (ATM)",  f"{a['iv_skew']:.2f}%")
 m6.metric("Reversal Score", f"{s:.1f}/100")
 
-# METRICS ROW 2
 m7, m8, m9, m10 = st.columns(4)
 m7.metric("Total Call OI",     f"{a['total_coi']/1e5:.2f}L")
 m8.metric("Total Put OI",      f"{a['total_poi']/1e5:.2f}L")
@@ -577,9 +570,8 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "📊  OI Profile", "⚡  Gamma Exposure", "〰  IV Skew", "🌡  Delta Pressure"
 ])
 with tab1:
-    st.plotly_chart(
-        chart_oi_profile(df, spot_price, a["top_call"], a["top_put"]),
-        use_container_width=True)
+    st.plotly_chart(chart_oi_profile(df, spot_price, a["top_call"], a["top_put"]),
+                    use_container_width=True)
 with tab2:
     st.plotly_chart(chart_gex(df, spot_price), use_container_width=True)
 with tab3:
@@ -603,7 +595,7 @@ else:
 # ==========================
 if show_table:
     st.markdown("---")
-    st.markdown("### 📋 Option Chain Data")
+    st.markdown("### Option Chain Data")
     atm_i = int((df["strike"] - spot_price).abs().idxmin())
     lo = max(0, atm_i - num_strikes)
     hi = min(len(df), atm_i + num_strikes + 1)
@@ -631,8 +623,8 @@ st.markdown("---")
 st.markdown(
     f"<p style='color:#9aaac0;font-size:0.62rem;text-align:right;"
     f"font-family:DM Mono,monospace;letter-spacing:0.06em'>"
-    f"LAST UPDATE: {fmt_ist(now_ist())} | "
-    f"EXPIRY: {selected_expiry} | "
+    f"LAST UPDATE: {fmt_ist(now_ist())} &nbsp;|&nbsp; "
+    f"EXPIRY: {selected_expiry} &nbsp;|&nbsp; "
     f"SNAPSHOTS: {len(st.session_state.history)}/{MAX_HISTORY}</p>",
     unsafe_allow_html=True,
 )
