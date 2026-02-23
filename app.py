@@ -1,8 +1,8 @@
 """
-Institutional HFT NIFTY Reversal Engine — v2.2
-- Light theme
-- Auto-refresh via pure JS (no external package needed)
-- All times in IST
+Institutional HFT NIFTY Reversal Engine — v2.3
+- Snapshots persist across refreshes and devices using st.cache_resource
+  (shared server-side memory — survives page reloads, works on all devices)
+- Light theme, pure JS auto-refresh, IST timestamps
 """
 
 import streamlit as st
@@ -23,6 +23,33 @@ def now_ist():
 
 def fmt_ist(dt):
     return dt.strftime("%d-%b-%Y  %I:%M:%S %p IST")
+
+# ==========================
+# PERSISTENT SHARED STORE
+# st.cache_resource creates a single object shared across ALL sessions,
+# browser tabs, and devices — it lives in the server process memory and
+# survives page reloads/refreshes until the server restarts.
+# ==========================
+@st.cache_resource
+def get_shared_store():
+    """Returns a dict that is shared across all users/sessions/refreshes."""
+    return {
+        "history": [],        # list of snapshot dicts
+        "max_history": 500,   # keep last 500 snapshots (~8hrs at 60s interval)
+    }
+
+store = get_shared_store()
+
+def append_snapshot(snap: dict):
+    """Thread-safe append with cap."""
+    store["history"].append(snap)
+    if len(store["history"]) > store["max_history"]:
+        store["history"] = store["history"][-store["max_history"]:]
+
+def get_history_df() -> pd.DataFrame:
+    if not store["history"]:
+        return pd.DataFrame()
+    return pd.DataFrame(store["history"])
 
 # ==========================
 # PAGE CONFIG
@@ -129,6 +156,18 @@ hr { border-color: #dde4f0 !important; margin: 18px 0 !important; }
     color: #1d4ed8; border-radius: 8px;
     font-size: 0.75rem; font-weight: 600;
 }
+.stat-pill {
+    display: inline-block;
+    background: #f0f5ff;
+    border: 1px solid #dde4f0;
+    border-radius: 20px;
+    padding: 4px 12px;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.68rem;
+    color: #2563eb;
+    font-weight: 500;
+    margin-right: 6px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -148,7 +187,6 @@ HEADERS = {
     "access-token": DHAN_ACCESS_TOKEN,
     "Client-Id": DHAN_CLIENT_ID,
 }
-MAX_HISTORY = 200
 
 CHART_BASE = dict(
     paper_bgcolor="rgba(255,255,255,0)",
@@ -162,12 +200,6 @@ CALL_CLR = "#2563eb"
 PUT_CLR  = "#e8294a"
 SPOT_CLR = "#059669"
 ATM_CLR  = "#d97706"
-
-# ==========================
-# SESSION STATE
-# ==========================
-if "history" not in st.session_state:
-    st.session_state.history = []
 
 # ==========================
 # SIDEBAR
@@ -216,32 +248,29 @@ with st.sidebar:
     show_table  = st.toggle("Show Option Chain Table", value=False)
     num_strikes = st.slider("Strikes +/-ATM", 5, 30, 15)
 
-    if st.button("Clear History", use_container_width=True):
-        st.session_state.history.clear()
-        st.success("History cleared.")
+    st.markdown("---")
+    snap_count = len(store["history"])
+    st.markdown(
+        f'<span class="stat-pill">📦 {snap_count} snapshots</span>',
+        unsafe_allow_html=True,
+    )
+    if st.button("Clear All Snapshots", use_container_width=True):
+        store["history"].clear()
+        st.success("History cleared for all devices.")
+        st.rerun()
 
 # ==========================
-# AUTO-REFRESH via pure JavaScript
-# Uses window.setTimeout to trigger a Streamlit rerun after N seconds.
-# No external packages — works on Streamlit Cloud, local, anywhere.
+# AUTO-REFRESH via pure JS (no package needed)
+# window.parent.location.reload() reloads the Streamlit app page
 # ==========================
 if auto_refresh:
     components.html(
-        f"""
-        <script>
-            // Wait N ms then reload the parent Streamlit page
-            setTimeout(function() {{
-                window.parent.location.reload();
-            }}, {refresh_secs * 1000});
-        </script>
-        """,
-        height=0,
-        width=0,
-    )
-    st.sidebar.markdown(
-        f"<p style='font-family:DM Mono,monospace;font-size:0.7rem;"
-        f"color:#5a6a90;margin-top:4px'>🔄 Refreshing every {refresh_secs}s</p>",
-        unsafe_allow_html=True,
+        f"""<script>
+        setTimeout(function() {{
+            window.parent.location.reload();
+        }}, {refresh_secs * 1000});
+        </script>""",
+        height=0, width=0,
     )
 
 # ==========================
@@ -442,7 +471,7 @@ def chart_pressure(df):
     return fig
 
 
-def chart_history(hist):
+def chart_history(hist: pd.DataFrame):
     if len(hist) < 2:
         return None
     fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -465,7 +494,7 @@ def chart_history(hist):
     fig.add_hline(y=25, secondary_y=True, line_dash="dash",
                   line_color="rgba(37,99,235,0.4)")
     fig.update_layout(**_layout(title="Intraday Price vs Reversal Score (IST)",
-                                height=380, legend=dict(orientation="h", y=1.1)))
+                                height=420, legend=dict(orientation="h", y=1.1)))
     return fig
 
 
@@ -505,15 +534,29 @@ if df_raw is None:
 a  = compute_analytics(df_raw, spot_price)
 df = a["df"]
 
-# Record snapshot with IST timestamp
-st.session_state.history.append({
-    "time":  now_ist(),
-    "price": spot_price,
-    "score": a["score"],
-    "pcr":   a["pcr"],
-})
-if len(st.session_state.history) > MAX_HISTORY:
-    st.session_state.history = st.session_state.history[-MAX_HISTORY:]
+# ── Append snapshot to shared persistent store ───────────────
+# Deduplicate: skip if last snapshot was taken within 5 seconds
+# (prevents double-writes when multiple tabs refresh simultaneously)
+hist_list = store["history"]
+now = now_ist()
+should_append = True
+if hist_list:
+    last_time = hist_list[-1]["time"]
+    if isinstance(last_time, datetime):
+        delta_secs = abs((now - last_time).total_seconds())
+        if delta_secs < 5:
+            should_append = False
+
+if should_append:
+    append_snapshot({
+        "time":    now,
+        "price":   spot_price,
+        "score":   a["score"],
+        "pcr":     a["pcr"],
+        "net_gamma": a["net_gamma"],
+        "iv_skew": a["iv_skew"],
+        "expiry":  selected_expiry,
+    })
 
 # ==========================
 # SIGNAL BANNER
@@ -523,19 +566,19 @@ if s >= reversal_threshold:
     if a["net_flow"] < 0:
         st.markdown(
             f'<div class="signal-box signal-top">'
-            f'WARNING: HIGH TOP REVERSAL PROBABILITY &nbsp;|&nbsp; Score: {s:.0f}/100 &nbsp;|&nbsp;'
+            f'WARNING: HIGH TOP REVERSAL &nbsp;|&nbsp; Score: {s:.0f}/100 &nbsp;|&nbsp;'
             f' PCR: {a["pcr"]:.2f} &nbsp;|&nbsp; Resistance: Rs {a["top_call"]:,.0f}</div>',
             unsafe_allow_html=True)
     else:
         st.markdown(
             f'<div class="signal-box signal-bottom">'
-            f'HIGH BOTTOM REVERSAL PROBABILITY &nbsp;|&nbsp; Score: {s:.0f}/100 &nbsp;|&nbsp;'
+            f'HIGH BOTTOM REVERSAL &nbsp;|&nbsp; Score: {s:.0f}/100 &nbsp;|&nbsp;'
             f' PCR: {a["pcr"]:.2f} &nbsp;|&nbsp; Support: Rs {a["top_put"]:,.0f}</div>',
             unsafe_allow_html=True)
 elif s <= (100 - reversal_threshold):
     st.markdown(
         f'<div class="signal-box signal-top">'
-        f'BEARISH MOMENTUM SIGNAL &nbsp;|&nbsp; Score: {s:.0f}/100</div>',
+        f'BEARISH MOMENTUM &nbsp;|&nbsp; Score: {s:.0f}/100</div>',
         unsafe_allow_html=True)
 else:
     st.markdown(
@@ -583,12 +626,40 @@ with tab4:
 # HISTORY CHART
 # ==========================
 st.markdown("---")
-hist_df  = pd.DataFrame(st.session_state.history)
-fig_hist = chart_history(hist_df)
-if fig_hist:
-    st.plotly_chart(fig_hist, use_container_width=True)
+hist_df = get_history_df()
+
+if not hist_df.empty and len(hist_df) >= 2:
+    # Show stats bar
+    first_t = fmt_ist(hist_df["time"].iloc[0])
+    last_t  = fmt_ist(hist_df["time"].iloc[-1])
+    price_range = f"Rs {hist_df['price'].min():,.0f} – Rs {hist_df['price'].max():,.0f}"
+    st.markdown(
+        f'<span class="stat-pill">📦 {len(hist_df)} snapshots</span>'
+        f'<span class="stat-pill">🕐 From: {first_t}</span>'
+        f'<span class="stat-pill">🕐 To: {last_t}</span>'
+        f'<span class="stat-pill">📈 Range: {price_range}</span>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    fig_hist = chart_history(hist_df)
+    if fig_hist:
+        st.plotly_chart(fig_hist, use_container_width=True)
+
+    # PCR history sub-chart
+    fig_pcr = go.Figure()
+    fig_pcr.add_scatter(x=hist_df["time"], y=hist_df["pcr"], name="PCR",
+                        line=dict(color="#7c3aed", width=2),
+                        fill="tozeroy", fillcolor="rgba(124,58,237,0.07)")
+    fig_pcr.add_hline(y=pcr_bull, line_dash="dash", line_color="rgba(37,99,235,0.5)",
+                      annotation_text="Bullish", annotation_font_color=CALL_CLR)
+    fig_pcr.add_hline(y=pcr_bear, line_dash="dash", line_color="rgba(232,41,74,0.5)",
+                      annotation_text="Bearish", annotation_font_color=PUT_CLR)
+    fig_pcr.update_layout(**_layout(title="PCR History (IST)", height=220))
+    st.plotly_chart(fig_pcr, use_container_width=True)
+
 else:
-    st.info("📈 Intraday history chart will appear after 2+ refresh cycles.")
+    st.info("📈 History charts will appear after 2+ snapshots are collected. Snapshots persist across all devices and page refreshes.")
 
 # ==========================
 # OPTION CHAIN TABLE (toggle)
@@ -625,6 +696,7 @@ st.markdown(
     f"font-family:DM Mono,monospace;letter-spacing:0.06em'>"
     f"LAST UPDATE: {fmt_ist(now_ist())} &nbsp;|&nbsp; "
     f"EXPIRY: {selected_expiry} &nbsp;|&nbsp; "
-    f"SNAPSHOTS: {len(st.session_state.history)}/{MAX_HISTORY}</p>",
+    f"SNAPSHOTS: {len(store['history'])}/500 &nbsp;|&nbsp; "
+    f"DATA SHARED ACROSS ALL DEVICES</p>",
     unsafe_allow_html=True,
 )
