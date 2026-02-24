@@ -255,7 +255,7 @@ hr { border-color: #dde4f0 !important; margin: 18px 0 !important; }
 # ==========================
 DHAN_CLIENT_ID    = "1100244268"
 DHAN_ACCESS_TOKEN = (
-    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzcxODY3MDEzLCJpYXQiOjE3NzE3ODA2MTMsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTAwMjQ0MjY4In0.nbBZwb0biSwbXIB9S5eg0CzrlMBqLSv9_NrWH_6BluzNawV6P4hP-nbLhUN1vmW4cF176_c6t31w5oRVAvsbyQ"
+    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzcxOTk1NTUwLCJpYXQiOjE3NzE5MDkxNTAsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTAwMjQ0MjY4In0.YlaLQqYPBdMoEqHft2IxISErErJSLudU9W2r4sf14lh9eFBo3SfFH_yLXKJXJrBH0FSbg-QKoCFtlXi8H_6GRg"
 )
 NIFTY_SECURITY_ID = 13
 EXCHANGE_SEGMENT  = "IDX_I"
